@@ -222,6 +222,31 @@ def run_walkforward_streamlit(df: pd.DataFrame,
     status_placeholder.success(f"Training complete in {_fmt_seconds(time.time()-t0)} (folds: {total})")
     return {"oof_pred": oof_pred, "metrics": pd.DataFrame(metrics), "models": models, "features": feat_cols}
 
+
+
+# --- ensure a usable Jupyter kernel for Papermill ---
+def get_or_create_kernel():
+    """
+    Return an existing kernel name (prefer 'python3'). If none are registered,
+    install a user-scoped ipykernel named 'streamlit-py' and return that.
+    """
+    try:
+        from jupyter_client.kernelspec import KernelSpecManager
+        ksm = KernelSpecManager()
+        specs = ksm.find_kernel_specs()  # dict name -> path
+        if "python3" in specs:
+            return "python3"
+    except Exception:
+        pass
+
+    # No kernels registered: create one
+    try:
+        from ipykernel.kernelspec import install as install_ipykernel
+        install_ipykernel(user=True, name="streamlit-py", display_name="Python 3 (streamlit)")
+        return "streamlit-py"
+    except Exception as e:
+        raise RuntimeError(f"Could not provision a Jupyter kernel: {e}")
+
 # ---- run a .ipynb via Papermill and pull last plot ----
 def run_ipynb_and_get_plot(nb_path: str, parameters: dict | None = None, out_dir: str = "runs"):
     """
@@ -247,12 +272,15 @@ def run_ipynb_and_get_plot(nb_path: str, parameters: dict | None = None, out_dir
     ts = pd.Timestamp.utcnow().strftime("%Y%m%d_%H%M%S")
     out_nb = out_dir / f"{nb_file.stem}__{ts}.ipynb"
 
+    kernel = get_or_create_kernel()  # NEW
     pm.execute_notebook(
-    input_path=str(nb_file),
-    output_path=str(out_nb),
-    parameters=parameters or {},
-    kernel_name=os.environ.get("PAPERMILL_KERNEL", "python3"),  # <-- force kernel
-    log_output=True)
+        input_path=str(nb_file),
+        output_path=str(out_nb),
+        parameters=parameters or {},
+        kernel_name=kernel,          # NEW: force a kernel that exists
+        log_output=True,
+    )
+
 
 
     nb = nbformat.read(out_nb, as_version=4)

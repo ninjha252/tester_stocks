@@ -248,11 +248,12 @@ def run_ipynb_and_get_plot(nb_path: str, parameters: dict | None = None, out_dir
     out_nb = out_dir / f"{nb_file.stem}__{ts}.ipynb"
 
     pm.execute_notebook(
-        input_path=str(nb_file),
-        output_path=str(out_nb),
-        parameters=parameters or {},
-        log_output=True,
-    )
+    input_path=str(nb_file),
+    output_path=str(out_nb),
+    parameters=parameters or {},
+    kernel_name=os.environ.get("PAPERMILL_KERNEL", "python3"),  # <-- force kernel
+    log_output=True)
+
 
     nb = nbformat.read(out_nb, as_version=4)
     for cell in reversed(nb.cells):

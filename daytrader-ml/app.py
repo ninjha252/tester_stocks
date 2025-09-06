@@ -1,6 +1,8 @@
 # app.py
 import sys, os, time, base64
 from pathlib import Path
+from pathlib import Path
+APP_DIR = Path(__file__).resolve().parent
 
 # Make repo importable whether run from root or /notebooks
 sys.path.insert(0, os.path.abspath("."))      # repo root
@@ -223,19 +225,30 @@ def run_walkforward_streamlit(df: pd.DataFrame,
 # ---- run a .ipynb via Papermill and pull last plot ----
 def run_ipynb_and_get_plot(nb_path: str, parameters: dict | None = None, out_dir: str = "runs"):
     """
-    Executes a notebook with papermill, returns (executed_notebook_path, image_bytes or None).
-    It searches the executed notebook's outputs for the last image/png. If none found,
-    it tries artifacts/equity.png as a fallback.
+    Execute a notebook with papermill. Returns (executed_nb_path, image_bytes or None).
+    Searches for the last inline image; falls back to artifacts/equity.png.
     """
-    out_dir = Path(out_dir)
+    # resolve to absolute
+    nb_file = Path(nb_path)
+    if not nb_file.is_absolute():
+        nb_file = (APP_DIR / nb_file).resolve()
+
+    if not nb_file.exists():
+        # Helpful debug: show what's actually present
+        notebooks_dir = (APP_DIR / "notebooks")
+        available = [p.name for p in notebooks_dir.glob("*.ipynb")] if notebooks_dir.exists() else []
+        raise FileNotFoundError(
+            f"Notebook not found: {nb_file}\nAvailable under {notebooks_dir}: {available}"
+        )
+
+    out_dir = (APP_DIR / out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
     ts = pd.Timestamp.utcnow().strftime("%Y%m%d_%H%M%S")
-    nb_path = Path(nb_path)
-    out_nb = out_dir / f"{nb_path.stem}__{ts}.ipynb"
+    out_nb = out_dir / f"{nb_file.stem}__{ts}.ipynb"
 
     pm.execute_notebook(
-        input_path=str(nb_path),
+        input_path=str(nb_file),
         output_path=str(out_nb),
         parameters=parameters or {},
         log_output=True,
@@ -246,11 +259,11 @@ def run_ipynb_and_get_plot(nb_path: str, parameters: dict | None = None, out_dir
         for out in reversed(cell.get("outputs", [])):
             data = out.get("data", {})
             if "image/png" in data:
+                import base64
                 img_bytes = base64.b64decode(data["image/png"])
                 return str(out_nb), img_bytes
 
-    # Fallback file saved by the notebook, if any
-    fallback = Path("artifacts/equity.png")
+    fallback = APP_DIR / "artifacts" / "equity.png"
     if fallback.exists():
         return str(out_nb), fallback.read_bytes()
 

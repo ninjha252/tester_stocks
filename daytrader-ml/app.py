@@ -224,12 +224,14 @@ def pipeline_for_symbol(sym: str,
                         n_estimators: int,
                         learning_rate: float,
                         use_progress: bool):
-    """Fetch, feature, train, backtest for one symbol. Returns (bt, metr, host, folds, res, feat_cols)."""
-    # data
+    """Fetch, feature, train (with optional fold progress), then backtest one symbol.
+       Returns (bt, metr, host, folds, res, feat_cols)."""
+
+    # ----- data -----
     try:
         df, host = get_bars(sym, interval, start_ts, end_ts)
-    except Exception as e:
-        # synthetic fallback so the app is still interactive
+    except Exception:
+        # synthetic fallback so the app still runs
         host = "synthetic"
         idx = pd.date_range(start_ts, end_ts, freq="1min", inclusive="left")
         price = 30000 + np.cumsum(np.random.normal(0, 10, len(idx)))
@@ -243,7 +245,7 @@ def pipeline_for_symbol(sym: str,
         }, index=idx)
         df.index = df.index.tz_localize("UTC")
 
-    # features + labels
+    # ----- features + labels -----
     fdf = build_features(
         df,
         rsi_periods=(7,14), macd=(12,26,9), atr_period=14,
@@ -253,12 +255,13 @@ def pipeline_for_symbol(sym: str,
     fdf = fdf.dropna()
 
     excluded = {"y","fwd_ret"}
-    base_exclude = {"open","high","low","close"}
+    base_exclude = {"open","high","low","close"}  # keep raw OHLC out of model inputs
     feat_cols = [c for c in fdf.columns if c not in excluded and c not in base_exclude]
 
-    # training
+    # ----- training (with optional progress/ETA) -----
     if use_progress:
-        status = st.empty(); pbar = st.progress(0.0)
+        status = st.empty()
+        pbar = st.progress(0.0)
         res = run_walkforward_streamlit(
             fdf, feat_cols, target_col="y",
             min_train_days=int(min_train_days),
@@ -279,11 +282,12 @@ def pipeline_for_symbol(sym: str,
         )
         res = run_walkforward(fdf, wf_cfg)
 
+    # folds must be computed AFTER either branch above
     folds = len(res.get("models", []))
     if folds == 0:
         return None, None, host, 0, res, feat_cols
 
-    # predictions + backtest
+    # ----- predictions + backtest -----
     fdf = fdf.join(res["oof_pred"].rename("proba"))
     bt, metr = backtest_fixed_horizon(
         fdf.dropna(subset=["proba","close"]),

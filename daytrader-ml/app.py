@@ -1,7 +1,10 @@
 # app.py
-import sys, os, time
-sys.path.insert(0, os.path.abspath("."))     # repo root
-sys.path.insert(0, os.path.abspath(".."))    # if run from notebooks/
+import sys, os, time, base64
+from pathlib import Path
+
+# Make repo importable whether run from root or /notebooks
+sys.path.insert(0, os.path.abspath("."))      # repo root
+sys.path.insert(0, os.path.abspath(".."))     # parent (for safety)
 
 import streamlit as st
 import pandas as pd
@@ -13,7 +16,11 @@ from requests import HTTPError
 from lightgbm import LGBMClassifier
 from sklearn.metrics import roc_auc_score, accuracy_score, precision_score, recall_score, f1_score
 
-# project modules
+# Notebook execution
+import papermill as pm
+import nbformat
+
+# Project modules
 import src.binance_downloader as bd
 from src.binance_downloader import fetch_klines
 from src.feature_engineering import build_features, make_labels
@@ -22,7 +29,10 @@ from src.utils import bps_to_frac
 
 st.set_page_config(page_title="Intraday ML Backtester", layout="wide")
 
-# ---------- helpers ----------
+# ======================
+# Helpers / Core logic
+# ======================
+
 def to_utc(ts: pd.Timestamp) -> pd.Timestamp:
     """Return a UTC-aware Timestamp whether input is naive or tz-aware."""
     ts = pd.Timestamp(ts)
@@ -31,7 +41,7 @@ def to_utc(ts: pd.Timestamp) -> pd.Timestamp:
 @st.cache_data(show_spinner=False)
 def get_bars(symbol: str, interval: str, start: pd.Timestamp, end: pd.Timestamp):
     """
-    Try Binance global then Binance US; return (df, host). DataFrame indexed by UTC time.
+    Try Binance global then Binance US; return (df, host). DataFrame indexed by UTC.
     """
     hosts = [
         "https://api.binance.com/api/v3/klines",
@@ -40,10 +50,10 @@ def get_bars(symbol: str, interval: str, start: pd.Timestamp, end: pd.Timestamp)
     last_err = None
     for host in hosts:
         try:
-            bd.BASE = host
+            bd.BASE = host  # tell our downloader which host to hit
             df = fetch_klines(symbol, interval, start, end)
             if len(df) > 0:
-                for c in ["open","high","low","close","volume"]:
+                for c in ["open", "high", "low", "close", "volume"]:
                     df[c] = df[c].astype(float)
                 if df.index.tz is None:
                     df.index = df.index.tz_localize("UTC")
@@ -203,12 +213,50 @@ def run_walkforward_streamlit(df: pd.DataFrame,
         avg = sum(times)/len(times)
         remaining = avg * (total - i)
         progress_bar.progress(i/total)
-        status_placeholder.info(f"Training fold {i}/{total} — elapsed: {_fmt_seconds(time.time()-t0)}  |  ETA: {_fmt_seconds(remaining)}")
+        status_placeholder.info(
+            f"Training fold {i}/{total} — elapsed: {_fmt_seconds(time.time()-t0)}  |  ETA: {_fmt_seconds(remaining)}"
+        )
 
     status_placeholder.success(f"Training complete in {_fmt_seconds(time.time()-t0)} (folds: {total})")
     return {"oof_pred": oof_pred, "metrics": pd.DataFrame(metrics), "models": models, "features": feat_cols}
 
-# pipeline (single or multi)
+# ---- run a .ipynb via Papermill and pull last plot ----
+def run_ipynb_and_get_plot(nb_path: str, parameters: dict | None = None, out_dir: str = "runs"):
+    """
+    Executes a notebook with papermill, returns (executed_notebook_path, image_bytes or None).
+    It searches the executed notebook's outputs for the last image/png. If none found,
+    it tries artifacts/equity.png as a fallback.
+    """
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    ts = pd.Timestamp.utcnow().strftime("%Y%m%d_%H%M%S")
+    nb_path = Path(nb_path)
+    out_nb = out_dir / f"{nb_path.stem}__{ts}.ipynb"
+
+    pm.execute_notebook(
+        input_path=str(nb_path),
+        output_path=str(out_nb),
+        parameters=parameters or {},
+        log_output=True,
+    )
+
+    nb = nbformat.read(out_nb, as_version=4)
+    for cell in reversed(nb.cells):
+        for out in reversed(cell.get("outputs", [])):
+            data = out.get("data", {})
+            if "image/png" in data:
+                img_bytes = base64.b64decode(data["image/png"])
+                return str(out_nb), img_bytes
+
+    # Fallback file saved by the notebook, if any
+    fallback = Path("artifacts/equity.png")
+    if fallback.exists():
+        return str(out_nb), fallback.read_bytes()
+
+    return str(out_nb), None
+
+# ---- one-symbol pipeline ----
 def pipeline_for_symbol(sym: str,
                         interval: str,
                         start_ts: pd.Timestamp,
@@ -282,7 +330,6 @@ def pipeline_for_symbol(sym: str,
         )
         res = run_walkforward(fdf, wf_cfg)
 
-    # folds must be computed AFTER either branch above
     folds = len(res.get("models", []))
     if folds == 0:
         return None, None, host, 0, res, feat_cols
@@ -300,7 +347,10 @@ def pipeline_for_symbol(sym: str,
     )
     return bt, metr, host, folds, res, feat_cols
 
-# ---------- UI ----------
+# ======================
+# UI
+# ======================
+
 with st.sidebar:
     st.header("Data")
     default_syms = [
@@ -317,7 +367,7 @@ with st.sidebar:
         symbol = st.selectbox("Symbol", options=default_syms, index=0)
 
     interval = st.selectbox("Interval", ["1m"], index=0)
-    end = pd.Timestamp.utcnow().floor("min")
+    end = pd.Timestamp.utcnow().floor("minute")
     start = st.date_input("Start date (UTC)", (end - pd.Timedelta(days=14)).date())
     end_date = st.date_input("End date (UTC)", end.date())
     start_ts = to_utc(pd.Timestamp(start))
@@ -343,43 +393,91 @@ with st.sidebar:
     n_estimators = st.number_input("Trees (n_estimators)", 50, 1500, 400, 50)
     learning_rate = st.slider("Learning rate", 0.005, 0.2, 0.03, 0.005)
 
+    st.header("Notebook mode")
+    nb_mode = st.toggle("Run .ipynb instead of in-app pipeline", value=False)
+    nb_path = st.text_input("Notebook path", "notebooks/01_intraday_lightgbm.ipynb", disabled=not nb_mode)
+
     run = st.button("Run backtest", use_container_width=True)
 
 st.title("Intraday ML Backtester (1-min)")
 
-# ---------- pipeline ----------
+# ======================
+# Main pipeline
+# ======================
+
 if run:
+    # ---- Notebook mode: execute .ipynb and show last plot ----
+    if nb_mode:
+        st.subheader("Notebook mode")
+        st.write(f"Executing: `{nb_path}`")
+
+        nb_params = {
+            "SYMBOL": (symbol if not compare_mode else (symbols[0] if symbols else "BTCUSDT")),
+            "HORIZON_MIN": int(horizon),
+            "COST_BPS": int(cost_bps),
+            "SLIP_BPS": int(slip_bps),
+            # Add more params here if your notebook defines them
+        }
+
+        with st.status("Running notebook…", expanded=True) as status:
+            try:
+                executed_path, img_bytes = run_ipynb_and_get_plot(nb_path, parameters=nb_params)
+                status.update(label=f"Finished: {executed_path}", state="complete")
+            except Exception as e:
+                status.update(label="Notebook failed", state="error")
+                st.error(f"{e}")
+                st.stop()
+
+        if img_bytes:
+            st.image(img_bytes, caption="Final plot from notebook")
+        else:
+            st.warning(
+                "Executed notebook, but no plot image was found. "
+                "Display a plot in the last cell or save one to artifacts/equity.png."
+            )
+        st.stop()
+
+    # ---- In-app pipeline (compare or single) ----
     if compare_mode:
         st.subheader("Comparing symbols")
         if not symbols:
             st.warning("Select at least one symbol.")
         else:
             rows = []
-            fig, ax = plt.subplots(figsize=(10,4))
-            prog = st.progress(0.0)
+            fig, ax = plt.subplots(figsize=(10, 4))
+            overall = st.progress(0.0)
+
             for i, sym in enumerate(symbols, start=1):
-                try:
-                    bt, metr, host, folds, _, _ = pipeline_for_symbol(
-                        sym, interval, start_ts, end_ts, horizon,
-                        cost_bps, slip_bps, long_th, short_th,
-                        min_train_days, test_window_days, embargo_min,
-                        n_estimators, learning_rate, use_progress=False
-                    )
-                    if bt is None:
-                        st.warning(f"{sym}: no folds with current dates/settings — skipped.")
-                    else:
-                        ax.plot(bt["equity"], label=sym)
-                        rows.append({"Symbol": sym, **metr, "Folds": folds, "Source": host})
-                except Exception as e:
-                    st.error(f"{sym}: {e}")
-                prog.progress(i/len(symbols))
+                st.markdown(f"### {sym}")
+                with st.container():
+                    try:
+                        bt, metr, host, folds, res, feat_cols = pipeline_for_symbol(
+                            sym, interval, start_ts, end_ts, horizon,
+                            cost_bps, slip_bps, long_th, short_th,
+                            min_train_days, test_window_days, embargo_min,
+                            n_estimators, learning_rate,
+                            use_progress=True  # per-symbol fold ETA/progress
+                        )
+                        if bt is None:
+                            st.warning(f"{sym}: no folds with current dates/settings — skipped.")
+                        else:
+                            st.caption(f"Source: {host} | Folds: {folds}")
+                            ax.plot(bt["equity"], label=sym)
+                            rows.append({"Symbol": sym, **metr, "Folds": folds, "Source": host})
+                    except Exception as e:
+                        st.error(f"{sym}: {e}")
+
+                overall.progress(i / len(symbols))
+
             if rows:
                 ax.set_title("Equity curves (fixed-horizon, no overlap)")
                 ax.set_xlabel("Time"); ax.set_ylabel("Equity")
                 ax.legend(loc="best")
                 st.pyplot(fig, clear_figure=True)
+
                 st.subheader("Summary metrics")
                 st.dataframe(pd.DataFrame(rows).set_index("Symbol"), use_container_width=True)
+
     else:
         st.subheader(f"Symbol: {symbol}")
         try:
@@ -387,9 +485,10 @@ if run:
                 symbol, interval, start_ts, end_ts, horizon,
                 cost_bps, slip_bps, long_th, short_th,
                 min_train_days, test_window_days, embargo_min,
-                n_estimators, learning_rate, use_progress=True
+                n_estimators, learning_rate,
+                use_progress=True
             )
-            st.caption(f"Source: {host} | Bars: {len(get_bars.cache_info().hits and get_bars(symbol, interval, start_ts, end_ts)[0] or [])} | Folds: {folds}")
+            st.caption(f"Source: {host} | Folds: {folds}")
 
             if bt is None:
                 st.info("No folds created. Reduce 'Min train days' or widen the date range.")
@@ -400,17 +499,15 @@ if run:
                 c3.metric("Max Drawdown", f"{metr['MaxDD']:.2%}")
                 c4.metric("Entries", f"{metr['Entries']}")
 
-                fig, ax = plt.subplots(figsize=(10,4))
+                fig, ax = plt.subplots(figsize=(10, 4))
                 bt["equity"].plot(ax=ax)
                 ax.set_title("Equity curve (fixed-horizon, no overlap)")
                 ax.set_xlabel("Time"); ax.set_ylabel("Equity")
                 st.pyplot(fig, clear_figure=True)
 
-                # folds table
                 st.subheader("Walk-forward fold metrics")
                 st.dataframe(res["metrics"], use_container_width=True)
 
-                # feature importance (last model)
                 if len(res["models"]):
                     fi = pd.DataFrame({
                         "feature": feat_cols,
@@ -422,5 +519,6 @@ if run:
                 st.caption("Note: Backtest results are for research only and not predictive of future returns.")
         except Exception as e:
             st.error(f"Run failed: {e}")
+
 else:
     st.info("Set your parameters in the sidebar and click **Run backtest**.")

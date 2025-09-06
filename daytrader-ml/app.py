@@ -248,55 +248,68 @@ def get_or_create_kernel():
         raise RuntimeError(f"Could not provision a Jupyter kernel: {e}")
 
 # ---- run a .ipynb via Papermill and pull last plot ----
+from pathlib import Path
+import os, base64
+APP_DIR = Path(__file__).resolve().parent
+
 def run_ipynb_and_get_plot(nb_path: str, parameters: dict | None = None, out_dir: str = "runs"):
-    """
-    Execute a notebook with papermill. Returns (executed_nb_path, image_bytes or None).
-    Searches for the last inline image; falls back to artifacts/equity.png.
-    """
-    # resolve to absolute
+    # resolve notebook path
     nb_file = Path(nb_path)
     if not nb_file.is_absolute():
         nb_file = (APP_DIR / nb_file).resolve()
-
     if not nb_file.exists():
-        # Helpful debug: show what's actually present
         notebooks_dir = (APP_DIR / "notebooks")
         available = [p.name for p in notebooks_dir.glob("*.ipynb")] if notebooks_dir.exists() else []
-        raise FileNotFoundError(
-            f"Notebook not found: {nb_file}\nAvailable under {notebooks_dir}: {available}"
-        )
+        raise FileNotFoundError(f"Notebook not found: {nb_file}\nAvailable under {notebooks_dir}: {available}")
 
-    out_dir = (APP_DIR / out_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
+    # ensure PYTHONPATH has repo root so `import src...` works inside the notebook kernel
+    os.environ["PYTHONPATH"] = str(APP_DIR) + os.pathsep + os.environ.get("PYTHONPATH", "")
 
+    out_dir = (APP_DIR / out_dir); out_dir.mkdir(parents=True, exist_ok=True)
     ts = pd.Timestamp.utcnow().strftime("%Y%m%d_%H%M%S")
     out_nb = out_dir / f"{nb_file.stem}__{ts}.ipynb"
 
-    kernel = get_or_create_kernel()  # NEW
-    pm.execute_notebook(
-        input_path=str(nb_file),
-        output_path=str(out_nb),
-        parameters=parameters or {},
-        kernel_name=kernel,          # NEW: force a kernel that exists
-        log_output=True,
-    )
+    # ensure a kernel exists (from earlier helper)
+    kernel = get_or_create_kernel()
 
+    # run with repo root as working directory
+    try:
+        pm.execute_notebook(
+            input_path=str(nb_file),
+            output_path=str(out_nb),
+            parameters=parameters or {},
+            kernel_name=kernel,
+            cwd=str(APP_DIR),          # <- key: run from repo root
+            log_output=True,
+        )
+    except TypeError:
+        # older papermill without cwd= support: temporary chdir
+        cur = os.getcwd()
+        os.chdir(APP_DIR)
+        try:
+            pm.execute_notebook(
+                input_path=str(nb_file),
+                output_path=str(out_nb),
+                parameters=parameters or {},
+                kernel_name=kernel,
+                log_output=True,
+            )
+        finally:
+            os.chdir(cur)
 
-
+    # pull last inline image or fallback file
     nb = nbformat.read(out_nb, as_version=4)
     for cell in reversed(nb.cells):
         for out in reversed(cell.get("outputs", [])):
             data = out.get("data", {})
             if "image/png" in data:
-                import base64
                 img_bytes = base64.b64decode(data["image/png"])
                 return str(out_nb), img_bytes
-
     fallback = APP_DIR / "artifacts" / "equity.png"
     if fallback.exists():
         return str(out_nb), fallback.read_bytes()
-
     return str(out_nb), None
+
 
 # ---- one-symbol pipeline ----
 def pipeline_for_symbol(sym: str,

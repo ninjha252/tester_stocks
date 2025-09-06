@@ -1,0 +1,18 @@
+symbol: "BTCUSDT"
+interval: "1m"
+start: "2024-08-01"
+end: "2024-08-10"
+target_horizon_minutes: 5
+cost_bps: 3
+slippage_bps: 2
+long_threshold: 0.55
+short_threshold: 0.45
+test_window_days: 2
+min_train_days: 10
+embargo_minutes: 30
+features:
+  rsi_periods: [7, 14]
+  macd: [12, 26, 9]
+  atr_period: 14
+  vol_windows: [5, 15, 60]
+  vwap_windows: [5, 15, 60]

@@ -367,7 +367,7 @@ with st.sidebar:
         symbol = st.selectbox("Symbol", options=default_syms, index=0)
 
     interval = st.selectbox("Interval", ["1m"], index=0)
-    end = pd.Timestamp.utcnow().floor("minute")
+    end = pd.Timestamp.utcnow().floor("min")
     start = st.date_input("Start date (UTC)", (end - pd.Timedelta(days=14)).date())
     end_date = st.date_input("End date (UTC)", end.date())
     start_ts = to_utc(pd.Timestamp(start))
